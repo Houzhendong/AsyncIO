@@ -105,6 +105,9 @@ namespace AsyncIO.Windows
         {
             get
             {
+                if (AddressFamily == AddressFamily.Unix)
+                    return null;
+
                 using ( var socketAddress = new SocketAddress( AddressFamily, AddressFamily == AddressFamily.InterNetwork ? 16 : 28))
                 {
                     int size = socketAddress.Size;
@@ -113,7 +116,7 @@ namespace AsyncIO.Windows
                     {
                         throw new SocketException();
                     }
-                    
+
                     return socketAddress.GetEndPoint();
                 }
             }
@@ -123,15 +126,18 @@ namespace AsyncIO.Windows
         {
             get
             {
+                if (AddressFamily == AddressFamily.Unix)
+                    return null;
+
                 using (var  socketAddress = new SocketAddress(AddressFamily, AddressFamily == AddressFamily.InterNetwork ? 16 : 28))
-                { 
+                {
                     int size = socketAddress.Size;
 
                     if (UnsafeMethods.getsockname(Handle, socketAddress.Buffer, ref size) != SocketError.Success)
                     {
                         throw new SocketException();
                     }
-                    
+
                     return socketAddress.GetEndPoint();
                 }
             }
@@ -375,15 +381,31 @@ namespace AsyncIO.Windows
             throw new SocketException();
         }
 
-        public override void Bind(IPEndPoint localEndPoint)
+        public override void Bind(EndPoint localEndPoint)
         {
+            if (localEndPoint == null)
+                throw new ArgumentNullException("localEndPoint");
+
+            var unixEndPoint = localEndPoint as UnixEndPoint;
+
+            if (unixEndPoint != null)
+            {
+                BindUnix(unixEndPoint.Path);
+                return;
+            }
+
+            var ipEndPoint = localEndPoint as IPEndPoint;
+
+            if (ipEndPoint == null)
+                throw new ArgumentException("Unsupported endpoint type", "localEndPoint");
+
             if (m_boundAddress != null)
             {
                 m_boundAddress.Dispose();
                 m_boundAddress = null;
             }
 
-            m_boundAddress = new SocketAddress(localEndPoint.Address, localEndPoint.Port);
+            m_boundAddress = new SocketAddress(ipEndPoint.Address, ipEndPoint.Port);
 
             // Accoring MSDN bind returns 0 if succeeded
             // and SOCKET_ERROR otherwise
@@ -391,6 +413,51 @@ namespace AsyncIO.Windows
             {
                 throw new SocketException();
             }
+        }
+
+        private void BindUnix(string path)
+        {
+            if (m_boundAddress != null)
+            {
+                m_boundAddress.Dispose();
+                m_boundAddress = null;
+            }
+
+            m_boundAddress = new SocketAddress(path);
+
+            // Accoring MSDN bind returns 0 if succeeded
+            // and SOCKET_ERROR otherwise
+            if (0 != UnsafeMethods.bind(Handle, m_boundAddress.Buffer, m_boundAddress.BindSize))
+            {
+                throw new SocketException();
+            }
+        }
+
+        private void BindUnnamedUnix()
+        {
+            if (m_boundAddress != null)
+            {
+                m_boundAddress.Dispose();
+                m_boundAddress = null;
+            }
+
+            var address = SocketAddress.CreateUnixUnnamed();
+
+            // Try the short (sun_family only) autobind form first; some
+            // winsock builds require the full sockaddr_un size, so fall
+            // back to that on failure.
+            if (0 != UnsafeMethods.bind(Handle, address.Buffer, address.BindSize))
+            {
+                address.BindSize = address.Size;
+
+                if (0 != UnsafeMethods.bind(Handle, address.Buffer, address.BindSize))
+                {
+                    address.Dispose();
+                    throw new SocketException();
+                }
+            }
+
+            m_boundAddress = address;
         }
 
         public override void Listen(int backlog)
@@ -404,22 +471,42 @@ namespace AsyncIO.Windows
             m_listener = new Listener(this);
         }
 
-        public override void Connect(IPEndPoint endPoint)
+        public override void Connect(EndPoint endPoint)
         {
+            if (endPoint == null)
+                throw new ArgumentNullException("endPoint");
+
             if (m_remoteAddress != null)
             {
                 m_remoteAddress.Dispose();
                 m_remoteAddress = null;
             }
 
-            m_remoteAddress = new SocketAddress(endPoint.Address, endPoint.Port);
+            var unixEndPoint = endPoint as UnixEndPoint;
 
-            if (m_boundAddress == null)
+            if (unixEndPoint != null)
             {
-                if (endPoint.AddressFamily == AddressFamily.InterNetwork)
-                    Bind(new IPEndPoint(IPAddress.Any, 0));
-                else
-                    Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
+                m_remoteAddress = new SocketAddress(unixEndPoint.Path);
+
+                if (m_boundAddress == null)
+                    BindUnnamedUnix();
+            }
+            else
+            {
+                var ipEndPoint = endPoint as IPEndPoint;
+
+                if (ipEndPoint == null)
+                    throw new ArgumentException("Unsupported endpoint type", "endPoint");
+
+                m_remoteAddress = new SocketAddress(ipEndPoint.Address, ipEndPoint.Port);
+
+                if (m_boundAddress == null)
+                {
+                    if (ipEndPoint.AddressFamily == AddressFamily.InterNetwork)
+                        Bind(new IPEndPoint(IPAddress.Any, 0));
+                    else
+                        Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
+                }
             }
 
             int bytesSend;
@@ -444,7 +531,17 @@ namespace AsyncIO.Windows
 
         internal void UpdateConnect()
         {
-            SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.UpdateConnectContext, null);
+            try
+            {
+                SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.UpdateConnectContext, null);
+            }
+            catch (SocketException)
+            {
+                // SO_UPDATE_CONNECT_CONTEXT is not supported for AF_UNIX on some
+                // winsock builds; the connection is still usable, so swallow it.
+                if (AddressFamily != AddressFamily.Unix)
+                    throw;
+            }
         }
 
         public override AsyncSocket GetAcceptedSocket()
@@ -475,7 +572,17 @@ namespace AsyncIO.Windows
                 address = BitConverter.GetBytes(Handle.ToInt64());
             }
 
-            m_listener.m_acceptSocket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.UpdateAcceptContext, address);            
+            try
+            {
+                m_listener.m_acceptSocket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.UpdateAcceptContext, address);
+            }
+            catch (SocketException)
+            {
+                // SO_UPDATE_ACCEPT_CONTEXT is not supported for AF_UNIX on some
+                // winsock builds; the connection is still usable, so swallow it.
+                if (AddressFamily != AddressFamily.Unix)
+                    throw;
+            }
         }
 
         public override void Send(byte[] buffer, int offset, int count, SocketFlags flags)

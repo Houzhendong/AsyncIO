@@ -50,6 +50,11 @@ namespace AsyncIO
             return Create(AddressFamily.InterNetworkV6, SocketType.Stream, ProtocolType.Tcp);
         }
 
+        public static AsyncSocket CreateUnix()
+        {
+            return Create(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+        }
+
         public AddressFamily AddressFamily { get; private set; }
 
         public SocketType SocketType { get; private set; }
@@ -224,11 +229,11 @@ namespace AsyncIO
 
         public abstract void Dispose();
          
-        public abstract void Bind(IPEndPoint localEndPoint);
+        public abstract void Bind(EndPoint localEndPoint);
 
         public abstract void Listen(int backlog);
 
-        public abstract void Connect(IPEndPoint endPoint);
+        public abstract void Connect(EndPoint endPoint);
 
         [Obsolete("Use Accept without parameter and GetAcceptedSocket")]
         public abstract void Accept(AsyncSocket socket);

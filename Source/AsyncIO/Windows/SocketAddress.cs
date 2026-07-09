@@ -16,9 +16,15 @@ namespace AsyncIO.Windows
     private GCHandle m_bufferHandle;
     private IntPtr m_bufferAddress;
 
+    // sizeof(sun_path) in sockaddr_un is 108, leaving room for the zero terminator.
+    private const int UnixMaxPathBytes = 107;
+    private const int UnixPathOffset = 2;
+    private const int UnixSocketAddressSize = 110; // 2 (sun_family) + 108 (sun_path)
+
     public SocketAddress(AddressFamily addressFamily, int size)
     {
       Size = size;
+      BindSize = size;
       m_addressFamily = addressFamily;
       m_buffer = new byte[size];
 
@@ -28,6 +34,38 @@ namespace AsyncIO.Windows
 
       m_bufferHandle = GCHandle.Alloc(m_buffer, GCHandleType.Pinned);
       m_bufferAddress = Marshal.UnsafeAddrOfPinnedArrayElement(m_buffer, 0);
+    }
+
+    /// <summary>
+    /// Builds a sockaddr_un for the given Unix Domain Socket path.
+    /// </summary>
+    public SocketAddress(string unixPath)
+      : this(AddressFamily.Unix, UnixSocketAddressSize)
+    {
+      if (unixPath == null)
+        throw new ArgumentNullException("unixPath");
+
+      byte[] pathBytes = Encoding.UTF8.GetBytes(unixPath);
+
+      if (pathBytes.Length > UnixMaxPathBytes)
+        throw new ArgumentException("Path is too long for a unix domain socket address (max " + UnixMaxPathBytes + " UTF8 bytes).", "unixPath");
+
+      for (int i = 0; i < pathBytes.Length; i++)
+        m_buffer[UnixPathOffset + i] = pathBytes[i];
+
+      m_buffer[UnixPathOffset + pathBytes.Length] = 0;
+    }
+
+    /// <summary>
+    /// Creates an unnamed AF_UNIX address, used for autobind before ConnectEx.
+    /// The initial BindSize is 2 (just sun_family); callers should retry a
+    /// failed bind with the full sockaddr_un size (see BindSize).
+    /// </summary>
+    public static SocketAddress CreateUnixUnnamed()
+    {
+      var address = new SocketAddress(AddressFamily.Unix, UnixSocketAddressSize);
+      address.BindSize = 2;
+      return address;
     }
 
     public SocketAddress(IPAddress ipAddress)
@@ -61,6 +99,21 @@ namespace AsyncIO.Windows
       return new IPEndPoint(GetIPAddress(), (int)Buffer[2] << 8 & 65280 | (int)Buffer[3]);
     }
 
+    /// <summary>
+    /// Reads back the path from a sockaddr_un buffer. UDS code paths
+    /// generally never need this (they don't call GetEndPoint), but it is
+    /// provided for completeness.
+    /// </summary>
+    public string GetUnixPath()
+    {
+      int length = 0;
+
+      while (UnixPathOffset + length < Size && Buffer[UnixPathOffset + length] != 0)
+        length++;
+
+      return Encoding.UTF8.GetString(Buffer, UnixPathOffset, length);
+    }
+
     internal IPAddress GetIPAddress()
     {
       if (m_addressFamily == AddressFamily.InterNetworkV6)
@@ -85,6 +138,13 @@ namespace AsyncIO.Windows
     }
 
     public int Size { get; private set; }
+
+    /// <summary>
+    /// The size to pass to bind(). Normally equal to Size, but for an unnamed
+    /// AF_UNIX address this can be set to 2 (just sun_family) for an initial
+    /// attempt, falling back to the full Size on failure.
+    /// </summary>
+    public int BindSize { get; set; }
 
     public IntPtr PinnedAddressBuffer
     {

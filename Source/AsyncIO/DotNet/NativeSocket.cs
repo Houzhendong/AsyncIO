@@ -42,12 +42,12 @@ namespace AsyncIO.DotNet
 
         public override System.Net.IPEndPoint LocalEndPoint
         {
-            get { return (IPEndPoint)m_socket.LocalEndPoint; }
+            get { return m_socket.LocalEndPoint as IPEndPoint; }
         }
 
         public override IPEndPoint RemoteEndPoint
         {
-            get { return (IPEndPoint)m_socket.RemoteEndPoint; }
+            get { return m_socket.RemoteEndPoint as IPEndPoint; }
         }
 
         private void OnAsyncCompleted(object sender, SocketAsyncEventArgs e)
@@ -87,6 +87,22 @@ namespace AsyncIO.DotNet
         {
             m_completionPort = completionPort;
             m_state = state;
+        }
+
+        private static System.Net.EndPoint ConvertEndPoint(System.Net.EndPoint endPoint)
+        {
+            // System.Net.Sockets.UnixDomainSocketEndPoint is only available on
+            // netstandard2.1+ / .NET Core and later - it was never backported to
+            // netstandard2.0 or .NET Framework - so on those TFMs NativeSocket falls
+            // through to AsyncIO's own UnixEndPoint.Serialize()/Create() below.
+#if NETSTANDARD2_1_OR_GREATER || NET
+            var unixEndPoint = endPoint as UnixEndPoint;
+            if (unixEndPoint != null)
+            {
+                return new System.Net.Sockets.UnixDomainSocketEndPoint(unixEndPoint.Path);
+            }
+#endif
+            return endPoint;
         }
 
         public override void SetSocketOption(SocketOptionLevel optionLevel, SocketOptionName optionName, bool optionValue)
@@ -141,9 +157,9 @@ namespace AsyncIO.DotNet
             }
         }
 
-        public override void Bind(System.Net.IPEndPoint localEndPoint)
+        public override void Bind(System.Net.EndPoint localEndPoint)
         {
-            m_socket.Bind(localEndPoint);
+            m_socket.Bind(ConvertEndPoint(localEndPoint));
         }
 
         public override void Listen(int backlog)
@@ -151,9 +167,9 @@ namespace AsyncIO.DotNet
             m_socket.Listen(backlog);
         }
 
-        public override void Connect(System.Net.IPEndPoint endPoint)
+        public override void Connect(System.Net.EndPoint endPoint)
         {
-            m_outSocketAsyncEventArgs.RemoteEndPoint = endPoint;
+            m_outSocketAsyncEventArgs.RemoteEndPoint = ConvertEndPoint(endPoint);
 
             if (!m_socket.ConnectAsync(m_outSocketAsyncEventArgs))
             {
